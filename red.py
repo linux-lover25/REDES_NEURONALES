@@ -1,7 +1,10 @@
 import math
+import json
 import random
 import tkinter as tk
 from dataclasses import dataclass
+from datetime import datetime, timezone
+from tkinter import filedialog, messagebox
 
 
 WIDTH = 940
@@ -207,6 +210,8 @@ class EvolutionFootball:
         self.view_button.pack(fill="x", pady=(0, 7))
         self.speed_button = self.make_button(controls, "VELOCIDAD  ·  ×2", self.cycle_speed)
         self.speed_button.pack(fill="x", pady=(0, 7))
+        self.export_button = self.make_button(controls, "↓  EXPORTAR PROGRESO", self.export_progress)
+        self.export_button.pack(fill="x", pady=(0, 7))
         self.reset_button = self.make_button(controls, "↻  NUEVA EVOLUCIÓN", self.restart)
         self.reset_button.pack(fill="x")
 
@@ -484,6 +489,78 @@ class EvolutionFootball:
         self.games_played += POPULATION_SIZE
         self.evolve()
         self.reset_matches()
+
+    def match_fitness(self, match, team):
+        if team == "blue":
+            return (
+                match["blue_score"] * 30
+                - match["red_score"] * 24
+                + match["progress_score"]
+                + match["touches"] * 0.08
+                + match["kicks"] * 0.16
+            )
+        return match["red_score"] * 30 - match["blue_score"] * 24 - match["progress_score"] * 0.7
+
+    def build_progress_export(self):
+        def export_networks(team, population):
+            return [
+                {
+                    "network_id": index + 1,
+                    "weights": genome,
+                    "fitness_so_far": self.match_fitness(self.matches[index], team),
+                    "match_progress": {
+                        "score_for": self.matches[index][f"{team}_score"],
+                        "score_against": self.matches[index]["red_score" if team == "blue" else "blue_score"],
+                        "seconds_remaining": round(self.matches[index]["time_left"], 3),
+                        "ball_x": round(self.matches[index]["ball_x"], 2),
+                        "ball_y": round(self.matches[index]["ball_y"], 2),
+                        "progress_score": round(self.matches[index]["progress_score"], 3),
+                        "touches": round(self.matches[index]["touches"], 2),
+                        "kicks": self.matches[index]["kicks"],
+                    },
+                }
+                for index, genome in enumerate(population)
+            ]
+
+        return {
+            "format": "evolve-football-progress",
+            "format_version": 1,
+            "exported_at": datetime.now(timezone.utc).isoformat(),
+            "generation": self.generation,
+            "population_size_per_team": POPULATION_SIZE,
+            "games_played": self.games_played,
+            "selected_match": self.candidate + 1,
+            "network_architecture": {
+                "inputs": NETWORK_INPUTS,
+                "hidden_neurons": NETWORK_HIDDEN,
+                "outputs": ["move_x", "move_y", "kick"],
+            },
+            "fitness_history_blue": self.history,
+            "best_fitness_blue": None if self.best_fitness == float("-inf") else self.best_fitness,
+            "networks": {
+                "blue": export_networks("blue", self.population),
+                "red": export_networks("red", self.red_population),
+            },
+        }
+
+    def export_progress(self):
+        file_path = filedialog.asksaveasfilename(
+            defaultextension=".json",
+            initialfile=f"evolve_generacion_{self.generation:03d}.json",
+            filetypes=[("Archivo JSON", "*.json")],
+            title="Exportar progreso de las redes neuronales",
+        )
+        if not file_path:
+            return
+
+        try:
+            with open(file_path, "w", encoding="utf-8") as export_file:
+                json.dump(self.build_progress_export(), export_file, ensure_ascii=False, indent=2)
+        except OSError as error:
+            messagebox.showerror("No se pudo exportar", str(error), parent=self.root)
+            return
+
+        messagebox.showinfo("Progreso exportado", f"Se guardó el progreso en:\n{file_path}", parent=self.root)
 
     def evolve(self):
         # Evolución azul
