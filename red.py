@@ -110,7 +110,7 @@ class EvolutionFootball:
         self.best_fitness = float("-inf")
         self.history = []
         self.games_played = 0
-        self.speed_options = [1, 2, 4, 8, 100]
+        self.speed_options = [1, 2, 4, 8, 100, 1000]
         self.speed_index = 1
         self.paused = False
         self.manual = False
@@ -1049,7 +1049,12 @@ class EvolutionFootball:
     def cycle_speed(self):
         self.speed_index = (self.speed_index + 1) % len(self.speed_options)
         speed = self.speed_options[self.speed_index]
-        label = f"VELOCIDAD SUPERSÓNICA · ×{speed}" if speed == 100 else f"VELOCIDAD  ·  ×{speed}"
+        if speed == 1000:
+            label = "VELOCIDAD ULTRASÓNICA · ×1000"
+        elif speed == 100:
+            label = "VELOCIDAD SUPERSÓNICA · ×100"
+        else:
+            label = f"VELOCIDAD  ·  ×{speed}"
         self.speed_button.configure(text=label)
 
     def restart(self):
