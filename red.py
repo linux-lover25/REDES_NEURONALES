@@ -1,8 +1,8 @@
-import math
 import json
+import math
 import random
 import tkinter as tk
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 from tkinter import filedialog, messagebox
 
@@ -110,7 +110,7 @@ class EvolutionFootball:
         self.best_fitness = float("-inf")
         self.history = []
         self.games_played = 0
-        self.speed_options = [1, 2, 4, 8]
+        self.speed_options = [1, 2, 4, 8, 100]
         self.speed_index = 1
         self.paused = False
         self.manual = False
@@ -210,6 +210,8 @@ class EvolutionFootball:
         self.view_button.pack(fill="x", pady=(0, 7))
         self.speed_button = self.make_button(controls, "VELOCIDAD  ·  ×2", self.cycle_speed)
         self.speed_button.pack(fill="x", pady=(0, 7))
+        self.import_button = self.make_button(controls, "↑  IMPORTAR PROGRESO", self.import_progress)
+        self.import_button.pack(fill="x", pady=(0, 7))
         self.export_button = self.make_button(controls, "↓  EXPORTAR PROGRESO", self.export_progress)
         self.export_button.pack(fill="x", pady=(0, 7))
         self.reset_button = self.make_button(controls, "↻  NUEVA EVOLUCIÓN", self.restart)
@@ -524,7 +526,7 @@ class EvolutionFootball:
 
         return {
             "format": "evolve-football-progress",
-            "format_version": 1,
+            "format_version": 2,
             "exported_at": datetime.now(timezone.utc).isoformat(),
             "generation": self.generation,
             "population_size_per_team": POPULATION_SIZE,
@@ -541,6 +543,15 @@ class EvolutionFootball:
                 "blue": export_networks("blue", self.population),
                 "red": export_networks("red", self.red_population),
             },
+            "matches": [self.serialize_match(match) for match in self.matches],
+        }
+
+    def serialize_match(self, match):
+        return {
+            field: [asdict(player) for player in match[field]]
+            if field in ("blue_players", "red_players")
+            else match[field]
+            for field in MATCH_FIELDS
         }
 
     def export_progress(self):
@@ -561,6 +572,209 @@ class EvolutionFootball:
             return
 
         messagebox.showinfo("Progreso exportado", f"Se guardó el progreso en:\n{file_path}", parent=self.root)
+
+    def decode_progress(self, data):
+        if not isinstance(data, dict) or data.get("format") != "evolve-football-progress":
+            raise ValueError("El archivo no es un progreso de EVOLVE.")
+
+        version = data.get("format_version")
+        if version not in (1, 2):
+            raise ValueError("La versión del archivo no es compatible.")
+
+        def require_number(value, label):
+            if type(value) not in (int, float) or not math.isfinite(value):
+                raise ValueError(f"El campo '{label}' debe ser un número finito.")
+            return float(value)
+
+        generation = self._progress_integer(data.get("generation"), "generation", 1)
+        games_played = self._progress_integer(data.get("games_played"), "games_played", 0)
+        selected_match = self._progress_integer(data.get("selected_match"), "selected_match", 1)
+        if selected_match > POPULATION_SIZE:
+            raise ValueError("El partido seleccionado no existe.")
+        if data.get("population_size_per_team") != POPULATION_SIZE:
+            raise ValueError("El tamaño de población del archivo no coincide con el juego.")
+
+        networks = data.get("networks")
+        if not isinstance(networks, dict):
+            raise ValueError("Faltan las poblaciones de redes neuronales.")
+
+        populations = {}
+        for team in ("blue", "red"):
+            entries = networks.get(team)
+            if not isinstance(entries, list) or len(entries) != POPULATION_SIZE:
+                raise ValueError(f"La población '{team}' debe contener {POPULATION_SIZE} redes.")
+            weights = []
+            for entry in entries:
+                if not isinstance(entry, dict) or not isinstance(entry.get("weights"), list):
+                    raise ValueError(f"Hay una red inválida en la población '{team}'.")
+                genome = entry["weights"]
+                if len(genome) != (NETWORK_INPUTS + 1) * NETWORK_HIDDEN + (NETWORK_HIDDEN + 1) * 3:
+                    raise ValueError(f"Una red de la población '{team}' tiene un tamaño incompatible.")
+                weights.append([require_number(weight, f"{team}.weights") for weight in genome])
+            populations[team] = weights
+
+        fitness_history = data.get("fitness_history_blue", [])
+        if not isinstance(fitness_history, list):
+            raise ValueError("El historial de aptitud no es válido.")
+        fitness_history = [require_number(value, "fitness_history_blue") for value in fitness_history]
+        best_fitness = data.get("best_fitness_blue")
+        if best_fitness is not None:
+            best_fitness = require_number(best_fitness, "best_fitness_blue")
+        else:
+            best_fitness = float("-inf")
+
+        if version == 2:
+            snapshots = data.get("matches")
+            if not isinstance(snapshots, list) or len(snapshots) != POPULATION_SIZE:
+                raise ValueError(f"El archivo debe contener los {POPULATION_SIZE} estados de partido.")
+            matches = [self.deserialize_match(snapshot) for snapshot in snapshots]
+        else:
+            matches = self.restore_legacy_matches(networks["blue"])
+
+        return {
+            "generation": generation,
+            "games_played": games_played,
+            "candidate": selected_match - 1,
+            "population": populations["blue"],
+            "red_population": populations["red"],
+            "history": fitness_history,
+            "best_fitness": best_fitness,
+            "matches": matches,
+        }
+
+    def deserialize_match(self, snapshot):
+        if not isinstance(snapshot, dict) or any(field not in snapshot for field in MATCH_FIELDS):
+            raise ValueError("Uno de los estados de partido está incompleto.")
+
+        match = {}
+        for field, team in (("blue_players", "blue"), ("red_players", "red")):
+            players = snapshot[field]
+            if not isinstance(players, list) or len(players) != 3:
+                raise ValueError("Cada equipo debe tener exactamente tres jugadores.")
+            decoded_players = []
+            for player_data in players:
+                if not isinstance(player_data, dict) or player_data.get("team") != team:
+                    raise ValueError("El archivo contiene un jugador inválido.")
+                if type(player_data.get("keeper")) is not bool:
+                    raise ValueError("El rol de un jugador no es válido.")
+                decoded_players.append(
+                    Player(
+                        x=self._progress_number(player_data.get("x"), "player.x"),
+                        y=self._progress_number(player_data.get("y"), "player.y"),
+                        team=team,
+                        keeper=player_data["keeper"],
+                        vx=self._progress_number(player_data.get("vx"), "player.vx"),
+                        vy=self._progress_number(player_data.get("vy"), "player.vy"),
+                        kick_wait=self._progress_number(player_data.get("kick_wait"), "player.kick_wait"),
+                    )
+                )
+            match[field] = decoded_players
+
+        for field in MATCH_FIELDS:
+            if field in ("blue_players", "red_players"):
+                continue
+            if field in ("blue_score", "red_score", "kicks"):
+                value = snapshot[field]
+                if type(value) is not int or value < 0:
+                    raise ValueError(f"El campo '{field}' no es válido.")
+                match[field] = value
+            else:
+                match[field] = self._progress_number(snapshot[field], field)
+        if not 0 <= match["time_left"] <= EPISODE_LENGTH:
+            raise ValueError("El tiempo restante de un partido no es válido.")
+        return match
+
+    @staticmethod
+    def _progress_number(value, label):
+        if type(value) not in (int, float) or not math.isfinite(value):
+            raise ValueError(f"El campo '{label}' debe ser un número finito.")
+        return float(value)
+
+    @staticmethod
+    def _progress_integer(value, label, minimum):
+        if type(value) is not int or value < minimum:
+            raise ValueError(f"El campo '{label}' no es válido.")
+        return value
+
+    def restore_legacy_matches(self, blue_networks):
+        matches = []
+        for network in blue_networks:
+            progress = network.get("match_progress")
+            if not isinstance(progress, dict):
+                raise ValueError("El archivo antiguo no contiene el progreso de los partidos.")
+            ball_x = self._progress_number(progress.get("ball_x"), "ball_x")
+            ball_y = self._progress_number(progress.get("ball_y"), "ball_y")
+            left, right = FIELD[0], FIELD[2]
+            match = {
+                "blue_players": [
+                    Player(left + 260, 235, "blue"),
+                    Player(left + 260, 345, "blue"),
+                    Player(left + 35, HEIGHT / 2, "blue", keeper=True),
+                ],
+                "red_players": [
+                    Player(right - 260, 235, "red"),
+                    Player(right - 260, 345, "red"),
+                    Player(right - 35, HEIGHT / 2, "red", keeper=True),
+                ],
+                "ball_x": ball_x,
+                "ball_y": ball_y,
+                "ball_vx": 0.0,
+                "ball_vy": 0.0,
+                "blue_score": self._progress_integer(progress.get("score_for"), "score_for", 0),
+                "red_score": self._progress_integer(progress.get("score_against"), "score_against", 0),
+                "time_left": self._progress_number(progress.get("seconds_remaining"), "seconds_remaining"),
+                "progress_score": self._progress_number(progress.get("progress_score"), "progress_score"),
+                "previous_ball_x": ball_x,
+                "touches": self._progress_number(progress.get("touches"), "touches"),
+                "kicks": self._progress_integer(progress.get("kicks"), "kicks", 0),
+                "goal_flash": 0.0,
+            }
+            if not 0 <= match["time_left"] <= EPISODE_LENGTH:
+                raise ValueError("El tiempo restante de un partido antiguo no es válido.")
+            matches.append(match)
+        return matches
+
+    def import_progress(self):
+        file_path = filedialog.askopenfilename(
+            filetypes=[("Archivo JSON", "*.json")],
+            title="Importar progreso de EVOLVE",
+        )
+        if not file_path:
+            return
+
+        try:
+            with open(file_path, "r", encoding="utf-8") as progress_file:
+                data = json.load(progress_file)
+            progress = self.decode_progress(data)
+        except (OSError, ValueError, TypeError, KeyError) as error:
+            messagebox.showerror("No se pudo importar", str(error), parent=self.root)
+            return
+
+        self.generation = progress["generation"]
+        self.games_played = progress["games_played"]
+        self.candidate = progress["candidate"]
+        self.population = progress["population"]
+        self.red_population = progress["red_population"]
+        self.history = progress["history"]
+        self.best_fitness = progress["best_fitness"]
+        self.matches = progress["matches"]
+        self.fitnesses = []
+        self.red_fitnesses = []
+        self.paused = False
+        self.manual = False
+        self.keys.clear()
+        self.last_time = None
+        self.pause_button.configure(text="Ⅱ  PAUSAR")
+        self.manual_button.configure(text="⌨  JUGAR TÚ · WASD")
+        self.load_match(self.candidate)
+        self.update_chart()
+        self.update_status()
+        self.draw()
+        messagebox.showinfo(
+            "Progreso importado",
+            f"Se restauró la generación {self.generation} con las 40 redes neuronales.",
+            parent=self.root,
+        )
 
     def evolve(self):
         # Evolución azul
@@ -614,23 +828,26 @@ class EvolutionFootball:
         elapsed = min(0.06, max(0.0, (now - self.last_time) / 1000))
         self.last_time = now
         if not self.paused:
-            dt = elapsed * self.speed_options[self.speed_index]
-            if self.manual:
-                self.load_match(self.candidate)
-                self.goal_flash = max(0.0, self.goal_flash - elapsed)
-                self.update_players(dt, self.candidate)
-                self.update_ball(dt)
-                self.save_match(self.candidate)
-            else:
-                for index in range(POPULATION_SIZE):
-                    self.load_match(index)
-                    self.goal_flash = max(0.0, self.goal_flash - elapsed)
-                    self.update_players(dt, index)
+            simulation_time = elapsed * self.speed_options[self.speed_index]
+            while simulation_time > 0:
+                dt = min(0.06, simulation_time)
+                simulation_time -= dt
+                if self.manual:
+                    self.load_match(self.candidate)
+                    self.goal_flash = max(0.0, self.goal_flash - dt)
+                    self.update_players(dt, self.candidate)
                     self.update_ball(dt)
-                    self.time_left -= dt
-                    self.save_match(index)
-                if self.matches[0]["time_left"] <= 0:
-                    self.finish_generation()
+                    self.save_match(self.candidate)
+                else:
+                    for index in range(POPULATION_SIZE):
+                        self.load_match(index)
+                        self.goal_flash = max(0.0, self.goal_flash - dt)
+                        self.update_players(dt, index)
+                        self.update_ball(dt)
+                        self.time_left -= dt
+                        self.save_match(index)
+                    if self.matches[0]["time_left"] <= 0:
+                        self.finish_generation()
 
         self.load_match(self.candidate)
         self.draw()
@@ -831,7 +1048,9 @@ class EvolutionFootball:
 
     def cycle_speed(self):
         self.speed_index = (self.speed_index + 1) % len(self.speed_options)
-        self.speed_button.configure(text=f"VELOCIDAD  ·  ×{self.speed_options[self.speed_index]}")
+        speed = self.speed_options[self.speed_index]
+        label = f"VELOCIDAD SUPERSÓNICA · ×{speed}" if speed == 100 else f"VELOCIDAD  ·  ×{speed}"
+        self.speed_button.configure(text=label)
 
     def restart(self):
         self.population = [new_genome() for _ in range(POPULATION_SIZE)]
