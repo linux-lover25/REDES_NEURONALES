@@ -12,11 +12,20 @@ HEIGHT = 560
 FIELD = (28, 42, 912, 532)
 GOAL_TOP = 238
 GOAL_BOTTOM = 336
+BALL_RADIUS = 9
+GOAL_BAR_HEIGHT = 8
+GOAL_BAR_SPEED = 82
 POPULATION_SIZE = 20
 ELITE_COUNT = 3
 EPISODE_LENGTH = 18.0
 NETWORK_INPUTS = 12
 NETWORK_HIDDEN = 8
+GOAL_BAR_FIELDS = (
+    "left_bar_y",
+    "left_bar_direction",
+    "right_bar_y",
+    "right_bar_direction",
+)
 MATCH_FIELDS = (
     "blue_players",
     "red_players",
@@ -32,7 +41,7 @@ MATCH_FIELDS = (
     "touches",
     "kicks",
     "goal_flash",
-)
+ ) + GOAL_BAR_FIELDS
 
 COLORS = {
     "background": "#101813",
@@ -270,12 +279,10 @@ class EvolutionFootball:
         self.blue_players = [
             Player(left + 260, 235, "blue"),
             Player(left + 260, 345, "blue"),
-            Player(left + 35, HEIGHT / 2, "blue", keeper=True),
         ]
         self.red_players = [
             Player(right - 260, 235, "red"),
             Player(right - 260, 345, "red"),
-            Player(right - 35, HEIGHT / 2, "red", keeper=True),
         ]
         self.ball_x = WIDTH / 2
         self.ball_y = HEIGHT / 2
@@ -289,6 +296,10 @@ class EvolutionFootball:
         self.touches = 0
         self.kicks = 0
         self.goal_flash = 0.0
+        self.left_bar_y = GOAL_TOP + BALL_RADIUS + GOAL_BAR_HEIGHT / 2
+        self.left_bar_direction = 1
+        self.right_bar_y = GOAL_BOTTOM - BALL_RADIUS - GOAL_BAR_HEIGHT / 2
+        self.right_bar_direction = -1
 
     def reset_matches(self):
         self.matches = []
@@ -343,23 +354,11 @@ class EvolutionFootball:
         player.x += player.vx * dt
         player.y += player.vy * dt
         player.kick_wait = max(0.0, player.kick_wait - dt)
-        if player.keeper:
-            player.x = max(left + 20, min(right - 20, player.x))
-        else:
-            player.x = max(left + 20, min(right - 20, player.x))
+        player.x = max(left + 20, min(right - 20, player.x))
         player.y = max(top + 20, min(bottom - 20, player.y))
-
-    def move_keeper(self, player, dt):
-        target_x = FIELD[0] + 37 if player.team == "blue" else FIELD[2] - 37
-        target_y = max(GOAL_TOP + 18, min(GOAL_BOTTOM - 18, self.ball_y))
-        self.steer_toward(player, target_x, target_y, 155, dt)
 
     # Ahora move_opponent usa red neuronal de la población roja
     def move_opponent(self, player, dt, genome_index):
-        if player.keeper:
-            self.move_keeper(player, dt)
-            return
-
         # Inputs para la red roja (notar que invertimos equipos en field_inputs)
         inputs = self.field_inputs(player, self.red_players, self.blue_players)
         outputs = neural_move(self.red_population[genome_index], inputs)
@@ -392,9 +391,6 @@ class EvolutionFootball:
         if genome_index is None:
             genome_index = self.candidate
         for player in self.blue_players:
-            if player.keeper:
-                self.move_keeper(player, dt)
-                continue
             if self.manual and player is blue_field[0]:
                 horizontal = int("d" in self.keys) - int("a" in self.keys)
                 vertical = int("s" in self.keys) - int("w" in self.keys)
@@ -419,8 +415,22 @@ class EvolutionFootball:
             # Ahora pasamos genome_index para que cada partido use el genoma correspondiente
             self.move_opponent(player, dt, genome_index)
 
+    def update_goal_bars(self, dt):
+        minimum_y = GOAL_TOP + BALL_RADIUS + GOAL_BAR_HEIGHT / 2
+        maximum_y = GOAL_BOTTOM - BALL_RADIUS - GOAL_BAR_HEIGHT / 2
+        for y_field, direction_field in (
+            ("left_bar_y", "left_bar_direction"),
+            ("right_bar_y", "right_bar_direction"),
+        ):
+            position = getattr(self, y_field) + getattr(self, direction_field) * GOAL_BAR_SPEED * dt
+            if position <= minimum_y or position >= maximum_y:
+                position = max(minimum_y, min(maximum_y, position))
+                setattr(self, direction_field, -getattr(self, direction_field))
+            setattr(self, y_field, position)
+
     def update_ball(self, dt):
         left, top, right, bottom = FIELD
+        self.update_goal_bars(dt)
         self.ball_x += self.ball_vx * dt
         self.ball_y += self.ball_vy * dt
         drag = max(0.0, 1.0 - 0.8 * dt)
@@ -433,14 +443,22 @@ class EvolutionFootball:
 
         if self.ball_x < left + 8 or self.ball_x > right - 8:
             if GOAL_TOP < self.ball_y < GOAL_BOTTOM:
-                if self.ball_x < left + 8:
+                left_goal = self.ball_x < left + 8
+                bar_y = self.left_bar_y if left_goal else self.right_bar_y
+                bar_direction = self.left_bar_direction if left_goal else self.right_bar_direction
+                if abs(self.ball_y - bar_y) <= BALL_RADIUS + GOAL_BAR_HEIGHT / 2:
+                    self.ball_x = left + 8 if left_goal else right - 8
+                    self.ball_vx = abs(self.ball_vx) * 0.78 if left_goal else -abs(self.ball_vx) * 0.78
+                    self.ball_vy = max(-300, min(300, self.ball_vy + bar_direction * 24))
+                elif left_goal:
                     self.red_score += 1
                 else:
                     self.blue_score += 1
-                self.goal_flash = 0.8
-                self.ball_x, self.ball_y = WIDTH / 2, HEIGHT / 2
-                self.ball_vx, self.ball_vy = 0.0, 0.0
-                self.place_players_for_kickoff()
+                if abs(self.ball_y - bar_y) > BALL_RADIUS + GOAL_BAR_HEIGHT / 2:
+                    self.goal_flash = 0.8
+                    self.ball_x, self.ball_y = WIDTH / 2, HEIGHT / 2
+                    self.ball_vx, self.ball_vy = 0.0, 0.0
+                    self.place_players_for_kickoff()
             else:
                 self.ball_x = max(left + 8, min(right - 8, self.ball_x))
                 self.ball_vx *= -0.76
@@ -526,7 +544,7 @@ class EvolutionFootball:
 
         return {
             "format": "evolve-football-progress",
-            "format_version": 2,
+            "format_version": 3,
             "exported_at": datetime.now(timezone.utc).isoformat(),
             "generation": self.generation,
             "population_size_per_team": POPULATION_SIZE,
@@ -578,7 +596,7 @@ class EvolutionFootball:
             raise ValueError("El archivo no es un progreso de EVOLVE.")
 
         version = data.get("format_version")
-        if version not in (1, 2):
+        if version not in (1, 2, 3):
             raise ValueError("La versión del archivo no es compatible.")
 
         def require_number(value, label):
@@ -623,11 +641,11 @@ class EvolutionFootball:
         else:
             best_fitness = float("-inf")
 
-        if version == 2:
+        if version in (2, 3):
             snapshots = data.get("matches")
             if not isinstance(snapshots, list) or len(snapshots) != POPULATION_SIZE:
                 raise ValueError(f"El archivo debe contener los {POPULATION_SIZE} estados de partido.")
-            matches = [self.deserialize_match(snapshot) for snapshot in snapshots]
+            matches = [self.deserialize_match(snapshot, version) for snapshot in snapshots]
         else:
             matches = self.restore_legacy_matches(networks["blue"])
 
@@ -642,35 +660,40 @@ class EvolutionFootball:
             "matches": matches,
         }
 
-    def deserialize_match(self, snapshot):
-        if not isinstance(snapshot, dict) or any(field not in snapshot for field in MATCH_FIELDS):
+    def deserialize_match(self, snapshot, version):
+        required_fields = MATCH_FIELDS if version == 3 else MATCH_FIELDS[:-len(GOAL_BAR_FIELDS)]
+        if not isinstance(snapshot, dict) or any(field not in snapshot for field in required_fields):
             raise ValueError("Uno de los estados de partido está incompleto.")
 
         match = {}
         for field, team in (("blue_players", "blue"), ("red_players", "red")):
             players = snapshot[field]
-            if not isinstance(players, list) or len(players) != 3:
-                raise ValueError("Cada equipo debe tener exactamente tres jugadores.")
+            expected_count = 2 if version == 3 else 3
+            if not isinstance(players, list) or len(players) != expected_count:
+                raise ValueError("La alineación guardada tiene un tamaño incompatible.")
             decoded_players = []
             for player_data in players:
                 if not isinstance(player_data, dict) or player_data.get("team") != team:
                     raise ValueError("El archivo contiene un jugador inválido.")
                 if type(player_data.get("keeper")) is not bool:
                     raise ValueError("El rol de un jugador no es válido.")
+                if player_data["keeper"]:
+                    continue
                 decoded_players.append(
                     Player(
                         x=self._progress_number(player_data.get("x"), "player.x"),
                         y=self._progress_number(player_data.get("y"), "player.y"),
                         team=team,
-                        keeper=player_data["keeper"],
                         vx=self._progress_number(player_data.get("vx"), "player.vx"),
                         vy=self._progress_number(player_data.get("vy"), "player.vy"),
                         kick_wait=self._progress_number(player_data.get("kick_wait"), "player.kick_wait"),
                     )
                 )
+            if len(decoded_players) != 2:
+                raise ValueError("Cada equipo debe tener dos jugadores de campo.")
             match[field] = decoded_players
 
-        for field in MATCH_FIELDS:
+        for field in required_fields:
             if field in ("blue_players", "red_players"):
                 continue
             if field in ("blue_score", "red_score", "kicks"):
@@ -680,8 +703,25 @@ class EvolutionFootball:
                 match[field] = value
             else:
                 match[field] = self._progress_number(snapshot[field], field)
+        if version < 3:
+            match.update(
+                {
+                    "left_bar_y": GOAL_TOP + BALL_RADIUS + GOAL_BAR_HEIGHT / 2,
+                    "left_bar_direction": 1,
+                    "right_bar_y": GOAL_BOTTOM - BALL_RADIUS - GOAL_BAR_HEIGHT / 2,
+                    "right_bar_direction": -1,
+                }
+            )
+        else:
+            for field in ("left_bar_direction", "right_bar_direction"):
+                if match[field] not in (-1, 1):
+                    raise ValueError(f"El campo '{field}' no es válido.")
         if not 0 <= match["time_left"] <= EPISODE_LENGTH:
             raise ValueError("El tiempo restante de un partido no es válido.")
+        minimum_y = GOAL_TOP + BALL_RADIUS + GOAL_BAR_HEIGHT / 2
+        maximum_y = GOAL_BOTTOM - BALL_RADIUS - GOAL_BAR_HEIGHT / 2
+        if not minimum_y <= match["left_bar_y"] <= maximum_y or not minimum_y <= match["right_bar_y"] <= maximum_y:
+            raise ValueError("La posición de una barra de portería no es válida.")
         return match
 
     @staticmethod
@@ -709,12 +749,10 @@ class EvolutionFootball:
                 "blue_players": [
                     Player(left + 260, 235, "blue"),
                     Player(left + 260, 345, "blue"),
-                    Player(left + 35, HEIGHT / 2, "blue", keeper=True),
                 ],
                 "red_players": [
                     Player(right - 260, 235, "red"),
                     Player(right - 260, 345, "red"),
-                    Player(right - 35, HEIGHT / 2, "red", keeper=True),
                 ],
                 "ball_x": ball_x,
                 "ball_y": ball_y,
@@ -728,6 +766,10 @@ class EvolutionFootball:
                 "touches": self._progress_number(progress.get("touches"), "touches"),
                 "kicks": self._progress_integer(progress.get("kicks"), "kicks", 0),
                 "goal_flash": 0.0,
+                "left_bar_y": GOAL_TOP + BALL_RADIUS + GOAL_BAR_HEIGHT / 2,
+                "left_bar_direction": 1,
+                "right_bar_y": GOAL_BOTTOM - BALL_RADIUS - GOAL_BAR_HEIGHT / 2,
+                "right_bar_direction": -1,
             }
             if not 0 <= match["time_left"] <= EPISODE_LENGTH:
                 raise ValueError("El tiempo restante de un partido antiguo no es válido.")
@@ -937,6 +979,23 @@ class EvolutionFootball:
         )
         self.canvas.create_oval(self.ball_x - 2, self.ball_y - 2, self.ball_x + 2, self.ball_y + 2, fill="#594b2b", outline="")
 
+    def draw_goal_bars(self, ghost=False):
+        stipple = "gray25" if ghost else ""
+        outline = "" if ghost else "#fff2bb"
+        for x1, x2, y in (
+            (FIELD[0] - 18, FIELD[0] + 2, self.left_bar_y),
+            (FIELD[2] - 2, FIELD[2] + 18, self.right_bar_y),
+        ):
+            self.canvas.create_rectangle(
+                x1,
+                y - GOAL_BAR_HEIGHT / 2,
+                x2,
+                y + GOAL_BAR_HEIGHT / 2,
+                fill=COLORS["gold"],
+                stipple=stipple,
+                outline=outline,
+            )
+
     def draw(self):
         self.draw_field()
         for index in range(POPULATION_SIZE):
@@ -948,6 +1007,7 @@ class EvolutionFootball:
             for player_index, player in enumerate(self.red_players):
                 self.draw_player(player, player_index, ghost=True)
             self.draw_ball(ghost=True)
+            self.draw_goal_bars(ghost=True)
 
         self.load_match(self.candidate)
         for index, player in enumerate(self.blue_players):
@@ -955,6 +1015,7 @@ class EvolutionFootball:
         for index, player in enumerate(self.red_players):
             self.draw_player(player, index)
         self.draw_ball()
+        self.draw_goal_bars()
 
         self.canvas.create_rectangle(0, 0, WIDTH, 32, fill="#101813", outline="")
         self.canvas.create_text(
